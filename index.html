@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>ESCANEO · Inventario por código de barras</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -190,7 +190,7 @@
     height:2px;
     background:linear-gradient(90deg, transparent, var(--amber), transparent);
     box-shadow:0 0 10px 2px rgba(245,183,0,.7);
-    animation:sweep 1.8s ease-in-out infinite;
+    animation:sweep 1.2s ease-in-out infinite;
   }
   @keyframes sweep{
     0%{ top:2%; opacity:0; }
@@ -219,7 +219,7 @@
     text-transform:uppercase;
   }
   .live-dot{ width:7px;height:7px;border-radius:50%; background:var(--red); }
-  .live-badge.on .live-dot{ background:var(--red); animation:blink 1.1s infinite; }
+  .live-badge.on .live-dot{ background:var(--green); animation:blink 0.6s infinite; }
   @keyframes blink{ 0%,100%{opacity:1;} 50%{opacity:.25;} }
 
   .last-code-strip{
@@ -462,9 +462,10 @@
       </div>
 
       <div class="scan-controls">
-        <button class="btn btn-primary" id="btnStart">▶ Iniciar cámara trasera</button>
+        <button class="btn btn-primary" id="btnStart">▶ Iniciar cámara</button>
         <button class="btn btn-danger" id="btnStop" disabled>■ Detener</button>
-        <button class="btn btn-ghost" id="btnFlip" style="display:none;" title="Cambiar de cámara">⟳ Cambiar cámara</button>
+        <button class="btn btn-ghost" id="btnFlip" title="Cambiar de cámara">⟳ Cambiar cámara</button>
+        <button class="btn btn-ghost" id="btnTorch" title="Linterna (si está disponible)" disabled>💡 Linterna</button>
       </div>
 
       <div class="manual-entry">
@@ -526,12 +527,12 @@
   "use strict";
 
   // ---------- State ----------
-  let items = [];           // {id, code, format, qty, desc, time, ts}
-  let codec = null;         // ZXing reader
+  let items = [];
+  let codec = null;
   let scanning = false;
   let lastScanCode = null;
   let lastScanAt = 0;
-  const SCAN_COOLDOWN_MS = 1400;
+  const SCAN_COOLDOWN_MS = 250; // reducido para mayor velocidad
 
   const $ = (id) => document.getElementById(id);
   const tbody = $('tbody');
@@ -543,30 +544,33 @@
   const liveBadge = $('liveBadge');
   const liveText = $('liveText');
   const lastCodeVal = $('lastCodeVal');
+  const btnTorch = $('btnTorch');
 
-  // ---------- Sound (Web Audio, no external files) ----------
+  // ---------- Sound (Web Audio) ----------
   let audioCtx = null;
   function getCtx(){
     if(!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     return audioCtx;
   }
   function beep(freq, duration, delay, type, gainVal){
-    const ctx = getCtx();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = type || 'square';
-    osc.frequency.value = freq;
-    gain.gain.value = gainVal || 0.06;
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    const t0 = ctx.currentTime + (delay || 0);
-    osc.start(t0);
-    gain.gain.setValueAtTime(gainVal || 0.06, t0);
-    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
-    osc.stop(t0 + duration + 0.02);
+    try {
+      const ctx = getCtx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = type || 'square';
+      osc.frequency.value = freq;
+      gain.gain.value = gainVal || 0.06;
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      const t0 = ctx.currentTime + (delay || 0);
+      osc.start(t0);
+      gain.gain.setValueAtTime(gainVal || 0.06, t0);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
+      osc.stop(t0 + duration + 0.02);
+    } catch(_) {}
   }
-  function soundNew(){ beep(1500, 0.09, 0, 'square', 0.07); }
-  function soundDup(){ beep(900, 0.06, 0, 'square', 0.06); beep(900, 0.06, 0.09, 'square', 0.06); }
+  function soundNew(){ beep(1500, 0.08, 0, 'square', 0.07); }
+  function soundDup(){ beep(900, 0.05, 0, 'square', 0.06); beep(900, 0.05, 0.08, 'square', 0.06); }
   function soundRemove(){ beep(500, 0.05, 0, 'sawtooth', 0.05); beep(300, 0.08, 0.06, 'sawtooth', 0.05); }
   function soundError(){ beep(220, 0.18, 0, 'sawtooth', 0.06); }
 
@@ -582,7 +586,7 @@
   // ---------- Helpers ----------
   function fmtTime(ts){
     const d = new Date(ts);
-    return d.toLocaleTimeString('es-ES', {hour:'2-digit', minute:'2-digit'});
+    return d.toLocaleTimeString('es-ES', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
   }
   function uid(){ return 'i' + Math.random().toString(36).slice(2,10) + Date.now().toString(36); }
 
@@ -621,6 +625,8 @@
     flashOk.classList.remove('active');
     void flashOk.offsetWidth;
     flashOk.classList.add('active');
+    // Vibración si está disponible
+    if(navigator.vibrate) navigator.vibrate(30);
   }
 
   function changeQty(id, delta){
@@ -689,7 +695,6 @@
   }
 
   function renderRow(id, flashNew){
-    // simplest reliable approach: re-render all (list sizes here are inventory-scale, not huge)
     renderAll();
     if(flashNew){
       const row = tbody.querySelector(`tr[data-id="${id}"]`);
@@ -773,30 +778,25 @@
     return d.toISOString().slice(0,19).replace(/[:T]/g,'-');
   }
 
-  // ---------- Camera / ZXing ----------
-  let currentFacing = 'environment'; // arranca en trasera siempre
-  let multipleCamsKnown = false;
+  // ---------- Camera / ZXing (mejorado) ----------
+  let currentFacing = 'environment';
+  let torchEnabled = false;
+  let stream = null;
 
   function buildHints(){
     const hints = new Map();
     if(window.ZXing && ZXing.DecodeHintType){
       const F = ZXing.BarcodeFormat;
+      // Limitamos a los formatos más comunes para velocidad y precisión
       hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
-        F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.CODE_128, F.CODE_39, F.CODE_93,
-        F.CODABAR, F.ITF, F.QR_CODE, F.DATA_MATRIX, F.PDF_417, F.AZTEC
+        F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.CODE_128,
+        F.CODE_39, F.CODE_93, F.CODABAR, F.ITF, F.QR_CODE,
+        F.DATA_MATRIX, F.PDF_417, F.AZTEC
       ]);
       hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+      hints.set(ZXing.DecodeHintType.CHARACTER_SET, 'UTF-8');
     }
     return hints;
-  }
-
-  async function checkMultipleCameras(){
-    try{
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      const cams = devices.filter(d => d.kind === 'videoinput');
-      multipleCamsKnown = cams.length > 1;
-      $('btnFlip').style.display = multipleCamsKnown ? 'inline-flex' : 'none';
-    }catch(err){ /* enumerate puede fallar sin permiso previo, no es grave */ }
   }
 
   async function startScanning(){
@@ -805,9 +805,9 @@
       toast('No se pudo cargar el motor de escaneo (revisa tu conexión)', true);
       return;
     }
-    try{
-      // timeBetweenScansMillis bajo = intenta decodificar más seguido = más rápido
-      codec = new ZXing.BrowserMultiFormatReader(buildHints(), 80);
+    try {
+      // Creamos el lector con un intervalo de escaneo muy bajo (50ms) para máxima velocidad
+      codec = new ZXing.BrowserMultiFormatReader(buildHints(), 50);
 
       scanPlaceholder.style.display = 'none';
       reticle.style.display = 'flex';
@@ -821,43 +821,73 @@
         audio: false,
         video: {
           facingMode: { ideal: currentFacing },
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-          advanced: [{ focusMode: 'continuous' }]
+          width: { ideal: 1280 },   // 720p es más rápido de procesar que 1080p
+          height: { ideal: 720 },
+          advanced: [
+            { focusMode: 'continuous' },
+            { exposureMode: 'continuous' },
+            { whiteBalanceMode: 'continuous' }
+          ]
         }
       };
 
-      await codec.decodeFromConstraints(constraints, video, (result, err) => {
+      // Guardamos el stream para poder controlar la linterna
+      stream = await navigator.mediaDevices.getUserMedia(constraints);
+      video.srcObject = stream;
+      await video.play();
+
+      // Intentamos activar la linterna si es posible
+      try {
+        const track = stream.getVideoTracks()[0];
+        if(track && track.getCapabilities && track.getCapabilities().torch) {
+          btnTorch.disabled = false;
+          btnTorch.textContent = '💡 Linterna';
+        } else {
+          btnTorch.disabled = true;
+        }
+      } catch(_) { btnTorch.disabled = true; }
+
+      // Iniciamos la decodificación
+      await codec.decodeFromVideoElement(video, (result, err) => {
         if(result){
           const code = result.getText();
           const format = result.getBarcodeFormat ? ZXing.BarcodeFormat[result.getBarcodeFormat()] : 'AUTO';
           const now = Date.now();
           if(code === lastScanCode && (now - lastScanAt) < SCAN_COOLDOWN_MS) return;
-          lastScanCode = code; lastScanAt = now;
+          lastScanCode = code;
+          lastScanAt = now;
           registerCode(code, format);
         }
       });
 
-      checkMultipleCameras();
-    }catch(err){
+    } catch(err) {
       console.error(err);
       let msg = 'No se pudo acceder a la cámara.';
       if(err && err.name === 'NotAllowedError') msg = 'Permiso de cámara denegado. Autorízalo en el navegador.';
       if(err && err.name === 'NotFoundError') msg = 'No se encontró ninguna cámara en este dispositivo.';
-      if(err && err.name === 'OverconstrainedError') msg = 'No se encontró cámara trasera, probando con la disponible…';
+      if(err && err.name === 'OverconstrainedError') {
+        msg = 'No se encontró cámara trasera, probando con la frontal…';
+        // Reintentamos con la frontal
+        setTimeout(() => {
+          currentFacing = 'user';
+          startScanning();
+        }, 300);
+      }
       toast(msg, true);
       stopScanning();
-      // fallback: si falló por restricción de facingMode, reintenta sin forzar
-      if(err && err.name === 'OverconstrainedError'){
-        setTimeout(() => { currentFacing = 'user'; startScanning(); }, 300);
-      }
     }
   }
 
   function stopScanning(){
     if(codec){
-      try{ codec.reset(); }catch(e){}
+      try { codec.reset(); } catch(_) {}
+      codec = null;
     }
+    if(stream){
+      stream.getTracks().forEach(t => t.stop());
+      stream = null;
+    }
+    video.srcObject = null;
     scanning = false;
     $('btnStart').disabled = false;
     $('btnStop').disabled = true;
@@ -865,16 +895,37 @@
     liveText.textContent = 'Detenido';
     reticle.style.display = 'none';
     scanPlaceholder.style.display = 'flex';
+    btnTorch.disabled = true;
+    btnTorch.textContent = '💡 Linterna';
+    torchEnabled = false;
   }
 
   function flipCamera(){
     currentFacing = currentFacing === 'environment' ? 'user' : 'environment';
-    if(scanning){ stopScanning(); startScanning(); }
+    if(scanning){
+      stopScanning();
+      setTimeout(startScanning, 200);
+    }
+  }
+
+  function toggleTorch(){
+    if(!stream) return;
+    const track = stream.getVideoTracks()[0];
+    if(!track) return;
+    try {
+      const capabilities = track.getCapabilities();
+      if(capabilities.torch) {
+        torchEnabled = !torchEnabled;
+        track.applyConstraints({ advanced: [{ torch: torchEnabled }] });
+        btnTorch.textContent = torchEnabled ? '💡 Linterna ON' : '💡 Linterna';
+      }
+    } catch(_) {}
   }
 
   $('btnStart').addEventListener('click', startScanning);
   $('btnStop').addEventListener('click', stopScanning);
   $('btnFlip').addEventListener('click', flipCamera);
+  $('btnTorch').addEventListener('click', toggleTorch);
 
   // ---------- Init ----------
   renderAll();
