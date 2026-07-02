@@ -462,9 +462,9 @@
       </div>
 
       <div class="scan-controls">
-        <button class="btn btn-primary" id="btnStart">▶ Iniciar cámara</button>
+        <button class="btn btn-primary" id="btnStart">▶ Iniciar cámara trasera</button>
         <button class="btn btn-danger" id="btnStop" disabled>■ Detener</button>
-        <select class="btn btn-ghost" id="cameraSelect" style="display:none;"></select>
+        <button class="btn btn-ghost" id="btnFlip" style="display:none;" title="Cambiar de cámara">⟳ Cambiar cámara</button>
       </div>
 
       <div class="manual-entry">
@@ -543,7 +543,6 @@
   const liveBadge = $('liveBadge');
   const liveText = $('liveText');
   const lastCodeVal = $('lastCodeVal');
-  const cameraSelect = $('cameraSelect');
 
   // ---------- Sound (Web Audio, no external files) ----------
   let audioCtx = null;
@@ -775,26 +774,40 @@
   }
 
   // ---------- Camera / ZXing ----------
-  async function listCameras(){
+  let currentFacing = 'environment'; // arranca en trasera siempre
+  let multipleCamsKnown = false;
+
+  function buildHints(){
+    const hints = new Map();
+    if(window.ZXing && ZXing.DecodeHintType){
+      const F = ZXing.BarcodeFormat;
+      hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+        F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.CODE_128, F.CODE_39, F.CODE_93,
+        F.CODABAR, F.ITF, F.QR_CODE, F.DATA_MATRIX, F.PDF_417, F.AZTEC
+      ]);
+      hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+    }
+    return hints;
+  }
+
+  async function checkMultipleCameras(){
     try{
       const devices = await navigator.mediaDevices.enumerateDevices();
       const cams = devices.filter(d => d.kind === 'videoinput');
-      cameraSelect.innerHTML = cams.map((c,i) => `<option value="${c.deviceId}">${c.label || 'Cámara ' + (i+1)}</option>`).join('');
-      cameraSelect.style.display = cams.length > 1 ? 'inline-flex' : 'none';
-      return cams;
-    }catch(err){ return []; }
+      multipleCamsKnown = cams.length > 1;
+      $('btnFlip').style.display = multipleCamsKnown ? 'inline-flex' : 'none';
+    }catch(err){ /* enumerate puede fallar sin permiso previo, no es grave */ }
   }
 
   async function startScanning(){
     if(scanning) return;
     if(typeof ZXing === 'undefined'){
-      toast('No se pudo cargar el motor de escaneo (sin conexión?)', true);
+      toast('No se pudo cargar el motor de escaneo (revisa tu conexión)', true);
       return;
     }
     try{
-      codec = new ZXing.BrowserMultiFormatReader();
-      const cams = await listCameras();
-      const deviceId = cameraSelect.value || (cams[cams.length - 1] && cams[cams.length - 1].deviceId) || undefined;
+      // timeBetweenScansMillis bajo = intenta decodificar más seguido = más rápido
+      codec = new ZXing.BrowserMultiFormatReader(buildHints(), 80);
 
       scanPlaceholder.style.display = 'none';
       reticle.style.display = 'flex';
@@ -804,10 +817,20 @@
       liveText.textContent = 'Escaneando';
       scanning = true;
 
-      codec.decodeFromVideoDevice(deviceId, video, (result, err) => {
+      const constraints = {
+        audio: false,
+        video: {
+          facingMode: { ideal: currentFacing },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          advanced: [{ focusMode: 'continuous' }]
+        }
+      };
+
+      await codec.decodeFromConstraints(constraints, video, (result, err) => {
         if(result){
           const code = result.getText();
-          const format = result.getBarcodeFormat ? String(result.getBarcodeFormat()) : 'AUTO';
+          const format = result.getBarcodeFormat ? ZXing.BarcodeFormat[result.getBarcodeFormat()] : 'AUTO';
           const now = Date.now();
           if(code === lastScanCode && (now - lastScanAt) < SCAN_COOLDOWN_MS) return;
           lastScanCode = code; lastScanAt = now;
@@ -815,11 +838,19 @@
         }
       });
 
-      await listCameras();
+      checkMultipleCameras();
     }catch(err){
       console.error(err);
-      toast('No se pudo acceder a la cámara: revisa permisos', true);
+      let msg = 'No se pudo acceder a la cámara.';
+      if(err && err.name === 'NotAllowedError') msg = 'Permiso de cámara denegado. Autorízalo en el navegador.';
+      if(err && err.name === 'NotFoundError') msg = 'No se encontró ninguna cámara en este dispositivo.';
+      if(err && err.name === 'OverconstrainedError') msg = 'No se encontró cámara trasera, probando con la disponible…';
+      toast(msg, true);
       stopScanning();
+      // fallback: si falló por restricción de facingMode, reintenta sin forzar
+      if(err && err.name === 'OverconstrainedError'){
+        setTimeout(() => { currentFacing = 'user'; startScanning(); }, 300);
+      }
     }
   }
 
@@ -836,9 +867,14 @@
     scanPlaceholder.style.display = 'flex';
   }
 
+  function flipCamera(){
+    currentFacing = currentFacing === 'environment' ? 'user' : 'environment';
+    if(scanning){ stopScanning(); startScanning(); }
+  }
+
   $('btnStart').addEventListener('click', startScanning);
   $('btnStop').addEventListener('click', stopScanning);
-  cameraSelect.addEventListener('change', () => { if(scanning){ stopScanning(); startScanning(); } });
+  $('btnFlip').addEventListener('click', flipCamera);
 
   // ---------- Init ----------
   renderAll();
